@@ -577,4 +577,4 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 - OAuth2 implementation with [yup-oauth2](https://docs.rs/yup-oauth2/)
 - CLI powered by [clap](https://docs.rs/clap/)
 
-Build with ❤️ by Webmobix
+Build with ❤️ by [Webmobix](https://webmobix.com)
