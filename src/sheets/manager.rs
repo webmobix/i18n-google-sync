@@ -43,6 +43,17 @@ struct SheetRowData {
     values: Vec<String>,
 }
 
+/// Outcome statistics returned by `batch_update_cells`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchUpdateOutcome {
+    /// Number of entirely new rows (new keys) added to the sheet.
+    pub new_rows: usize,
+    /// Number of individual translation cells filled for existing keys.
+    pub filled_cells: usize,
+    /// Total number of value updates submitted (sum of all row + cell write operations prepared in the request).
+    pub total_updates: usize,
+}
+
 const RATE_LIMIT_MAX_RETRIES: usize = 3;
 const MAIN_LANGUAGE_SUFFIX: &str = " (main)";
 
@@ -541,9 +552,10 @@ impl SheetsManager {
                         }
                     }
 
-                    if !language_values.is_empty() {
-                        keys_map.insert(key, language_values);
-                    }
+                    // INSERT/UPDATE CHANGE: Always record the key even if all translation cells are currently empty.
+                    // This allows us to later fill empty translations without risking row overwrite due to
+                    // mis-counting populated keys.
+                    keys_map.entry(key).or_insert(language_values);
                 }
 
                 info!(
@@ -643,9 +655,8 @@ impl SheetsManager {
                             }
                         }
 
-                        if !language_values.is_empty() {
-                            keys_map.insert(key, language_values);
-                        }
+                        // Always insert the key (even if language_values is empty) to allow subsequent backfill.
+                        keys_map.insert(key, language_values);
                     }
                 }
 
@@ -747,193 +758,160 @@ impl SheetsManager {
 
     /// Batch update multiple cells in a worksheet efficiently.
     ///
-    /// # Arguments
+    /// This method now performs TWO categories of updates without switching to Google Sheets "append" mode:
+    /// 1. Adds entirely new keys by writing full rows at the next free row after the last non-empty key row
+    ///    (determined via `fetch_last_used_row` scanning column A), avoiding the previous risk of row
+    ///    overwrite when sparse rows or empty translation cells existed.
+    /// 2. For existing keys, fills ONLY the missing language cells (empty translations) using either the
+    ///    provided explicit translation or a generated GOOGLETRANSLATE formula referencing the row's default
+    ///    language cell. Previously these keys were skipped completely, leaving gaps indefinitely.
     ///
-    /// * `namespace` - The worksheet name to update
-    /// * `translation_keys` - Vector of TranslationKey structs to add/update
-    /// * `languages` - Ordered list of language codes for column positioning
-    /// * `dry_run` - If true, only preview changes without applying them
+    /// Overwrite prevention rationale:
+    /// * We no longer infer the next row from `existing_keys.len()` (which ignored keys whose translations
+    ///   were all empty). Instead we scan column A to find the true last used row number.
+    /// * We always record keys (even with zero translations) in `read_existing_keys`, removing
+    ///   under-count drift.
+    /// * In-batch duplicate keys are ignored after the first occurrence.
+    ///
+    /// Return value semantics: returns a `BatchUpdateOutcome` struct containing:
+    /// * `new_rows` - count of newly appended key rows
+    /// * `filled_cells` - count of previously empty translation cells filled for existing rows
+    /// * `total_updates` - total individual update operations (new row ranges + single-cell ranges)
+    ///
+    /// # Arguments
+    /// * `namespace` - Worksheet name
+    /// * `translation_keys` - Keys (with any subset of language values) from local source
+    /// * `languages` - Ordered language headers corresponding to sheet columns
+    /// * `dry_run` - If true, nothing is written; a preview of actions (new rows + cell backfills) is logged
+    ///
+    /// # Edge Cases Handled
+    /// * Sparse sheets with blank rows
+    /// * Keys present with all translations empty
+    /// * Mixed manual and formula-based translations
+    /// * Duplicate keys within the provided `translation_keys` slice
     ///
     /// # Returns
-    ///
-    /// Number of rows updated if successful, otherwise an error.
+    /// Count of NEW rows added (existing key cell backfills are not counted in the return value)
     pub async fn batch_update_cells(
         &mut self,
         namespace: &str,
         translation_keys: &[TranslationKey],
         languages: &[String],
         dry_run: bool,
-    ) -> Result<usize> {
+    ) -> Result<BatchUpdateOutcome> {
         if dry_run {
             info!(
-                "🔍 [DRY RUN] Would update {} translation keys in worksheet '{}'",
+                "🔍 [DRY RUN] Would process {} translation keys in worksheet '{}' (adding new + filling missing)",
                 translation_keys.len(),
                 namespace
             );
-
-            // Show preview of what would be updated
-            for key in translation_keys {
-                info!("  📝 Key: {}", key.key_path);
-                for (lang, value) in &key.values {
-                    info!("      {} -> {}", lang, value);
-                }
+            for key in translation_keys.iter().take(10) { // preview subset
+                info!("  📝 Key preview: {} ({} provided values)", key.key_path, key.values.len());
             }
-
-            return Ok(translation_keys.len());
+            if translation_keys.len() > 10 {
+                info!("  ... and {} more keys", translation_keys.len() - 10);
+            }
         }
 
         if translation_keys.is_empty() {
-            info!("📋 No translation keys to update in '{}'", namespace);
-            return Ok(0);
+            info!("📋 No translation keys to process in '{}'", namespace);
+            return Ok(BatchUpdateOutcome { new_rows: 0, filled_cells: 0, total_updates: 0 });
         }
 
         info!(
-            "💾 Updating {} translation keys in worksheet '{}'",
+            "💾 Processing {} translation keys in worksheet '{}' (add new + fill missing)",
             translation_keys.len(),
             namespace
         );
 
-        // Read existing data to determine where to place new keys
+        // Existing keys map now includes keys with zero translations.
         let existing_keys = self.read_existing_keys(namespace).await?;
 
-        let sheet_id = self.sheet_id.clone();
-        let mut next_row = existing_keys.len() + 2; // +1 for header, +1 for 1-based indexing
+        // Determine actual last used row (header row is row 1). Prevents overwrites when keys had only empty translations.
+        let last_used_row = self.fetch_last_used_row(namespace).await.unwrap_or(1);
+        let mut next_row = if last_used_row < 1 { 2 } else { last_used_row + 1 };
 
-        // Prepare batch update data
-        let mut value_ranges = Vec::new();
-
-        for translation_key in translation_keys {
-            // Skip if key already exists (for now - could be enhanced to update existing keys)
-            if existing_keys.contains_key(&translation_key.key_path) {
-                warn!("⚠️  Skipping existing key: {}", translation_key.key_path);
-                continue;
-            }
-
-            // Create row data: [Key, Description, Language values...]
-            let mut row_values = vec![
-                serde_json::Value::String(translation_key.key_path.clone()),
-                serde_json::Value::String("".to_string()), // Empty description
-            ];
-
-            // Add language values in order
-            let default_language = Self::find_default_language_static(translation_key, languages);
-            for language in languages.iter() {
-                let value = Self::get_cell_value_for_language_static(
-                    translation_key,
-                    language,
-                    &default_language,
-                    languages,
-                    next_row,
-                );
-
-                row_values.push(serde_json::Value::String(value));
-            }
-
-            // Create range for this row
-            let end_column_index = languages.len() + 1; // Zero-based index (A=0)
-            let end_column_letter = Self::column_index_to_letter(end_column_index);
-            let range = format!(
-                "{}!A{}:{}{}",
-                namespace, next_row, end_column_letter, next_row
-            );
-
-            let value_range = ValueRange {
-                range: Some(range),
-                values: Some(vec![row_values]),
-                major_dimension: Some("ROWS".to_string()),
-                ..Default::default()
-            };
-
-            value_ranges.push(value_range);
-            next_row += 1;
-        }
-
-        if value_ranges.is_empty() {
-            info!("📋 No new keys to add to '{}'", namespace);
-            return Ok(0);
-        }
-
-        info!(
-            "📊 Prepared {} rows for batch update in '{}'",
-            value_ranges.len(),
-            namespace
-        );
-
-        if dry_run {
-            info!(
-                "🔍 [DRY RUN] Would add {} keys to worksheet '{}'",
-                value_ranges.len(),
-                namespace
-            );
-            // Show preview of what would be added
-            for (i, range) in value_ranges.iter().take(3).enumerate() {
-                if let Some(values) = &range.values
-                    && let Some(row) = values.first()
-                    && let Some(key) = row.first()
-                {
-                    info!("  {}. Key: {}", i + 1, key);
+        // Build key -> row number mapping by reading column A (excluding header) so we can update specific cells.
+        let mut key_row_map: HashMap<String, usize> = HashMap::new();
+        if last_used_row >= 2 { // there are data rows
+            let sheet_id = self.sheet_id.clone();
+            let hub = self.get_hub().await?;
+            let range = format!("{}!A2:A{}", namespace, last_used_row);
+            if let Ok((_, col_data)) = Self::call_with_rate_limit_retry("fetch key column for row mapping", || {
+                let hub = hub; let sheet_id = sheet_id.clone(); let range = range.clone();
+                async move { hub.spreadsheets().values_get(&sheet_id, &range).doit().await }
+            }).await {
+                if let Some(rows) = col_data.values { // rows is Vec<Vec<Value>>
+                    for (idx, row) in rows.into_iter().enumerate() {
+                        if let Some(first) = row.get(0).and_then(|v| v.as_str()) {
+                            let key = first.trim();
+                            if !key.is_empty() { key_row_map.insert(key.to_string(), idx + 2); } // +2 because A2 corresponds to idx 0
+                        }
+                    }
                 }
             }
-            if value_ranges.len() > 3 {
-                info!("  ... and {} more keys", value_ranges.len() - 3);
+        }
+
+        // REFACTORED: use planning helper instead of inline logic
+        let (value_ranges, new_rows_added, existing_cells_filled, existing_keys_cells_per_language) =
+            self.plan_batch_updates(
+                namespace,
+                translation_keys,
+                languages,
+                &existing_keys,
+                next_row,
+                &key_row_map,
+            );
+
+        if value_ranges.is_empty() {
+            info!("📋 Nothing to add or fill in '{}'", namespace);
+            return Ok(BatchUpdateOutcome { new_rows: 0, filled_cells: 0, total_updates: 0 });
+        }
+
+        if dry_run {
+            info!("🔍 [DRY RUN] Would add {} new rows and fill {} existing empty cells ({} total updates) in '{}'", new_rows_added, existing_cells_filled, value_ranges.len(), namespace);
+            for (lang, count) in existing_keys_cells_per_language.iter() {
+                info!("  🌍 Missing cell fills for '{}': {}", lang, count);
             }
-            return Ok(value_ranges.len());
+            return Ok(BatchUpdateOutcome { new_rows: new_rows_added, filled_cells: existing_cells_filled, total_updates: value_ranges.len() });
         }
 
         // Validate batch size to prevent API limits
         const MAX_BATCH_SIZE: usize = 100;
         if value_ranges.len() > MAX_BATCH_SIZE {
-            return self
-                .batch_update_in_chunks(namespace, value_ranges, MAX_BATCH_SIZE)
-                .await;
+            let updated = self.batch_update_in_chunks(namespace, value_ranges, MAX_BATCH_SIZE).await?;
+            if existing_cells_filled > 0 { info!("🧩 Filled {} existing cells while adding {} new rows in '{}'", existing_cells_filled, new_rows_added, namespace); }
+            return Ok(BatchUpdateOutcome { new_rows: new_rows_added, filled_cells: existing_cells_filled, total_updates: updated });
         }
 
-        // Execute batch update with enhanced error handling
+        // Execute batch update
         let batch_request = BatchUpdateValuesRequest {
-            value_input_option: Some("USER_ENTERED".to_string()), // Allow formulas
+            value_input_option: Some("USER_ENTERED".to_string()),
             data: Some(value_ranges.clone()),
             ..Default::default()
         };
 
-        info!(
-            "🚀 Executing batch update for {} rows...",
-            value_ranges.len()
-        );
+        info!("🚀 Executing batch update: {} new rows, {} existing empty cells ({} value ranges)", new_rows_added, existing_cells_filled, value_ranges.len());
 
+        let sheet_id = self.sheet_id.clone();
         let hub = self.get_hub().await?;
         let result = Self::call_with_rate_limit_retry("batch update worksheet values", || {
-            let hub = hub;
-            let sheet_id = sheet_id.clone();
-            let request = batch_request.clone();
-            async move {
-                hub.spreadsheets()
-                    .values_batch_update(request, &sheet_id)
-                    .doit()
-                    .await
-            }
-        })
-        .await;
+            let hub = hub; let sheet_id = sheet_id.clone(); let request = batch_request.clone();
+            async move { hub.spreadsheets().values_batch_update(request, &sheet_id).doit().await }
+        }).await;
 
         match result {
             Ok((_, response)) => {
                 let updated_cells = response.total_updated_cells.unwrap_or(0);
                 let updated_rows = response.total_updated_rows.unwrap_or(0);
-
                 info!(
-                    "✅ Successfully added {} keys ({} cells) to worksheet '{}'",
-                    updated_rows, updated_cells, namespace
+                    "✅ Batch complete: added {} new rows, filled {} existing cells (Google reports {} rows, {} cells updated) in '{}'",
+                    new_rows_added, existing_cells_filled, updated_rows, updated_cells, namespace
                 );
-
-                // Validate results
-                if updated_rows != value_ranges.len() as i32 {
-                    warn!(
-                        "⚠️  Warning: Expected {} rows but updated {} rows",
-                        value_ranges.len(),
-                        updated_rows
-                    );
+                for (lang, count) in existing_keys_cells_per_language.iter() {
+                    info!("  🌍 Filled {} '{}' cells", count, lang);
                 }
-
-                Ok(updated_rows as usize)
+                Ok(BatchUpdateOutcome { new_rows: new_rows_added, filled_cells: existing_cells_filled, total_updates: updated_cells as usize })
             }
             Err(e) => {
                 let error_msg = format!(
@@ -941,12 +919,8 @@ impl SheetsManager {
                     namespace, e
                 );
                 error!("❌ {}", error_msg);
-
-                // Provide more specific error context
                 if e.to_string().contains("quota") || e.to_string().contains("rate") {
-                    info!(
-                        "💡 Tip: You may have hit API rate limits. Try reducing batch size or wait before retrying."
-                    );
+                    info!("💡 Tip: You may have hit API rate limits. Try reducing batch size or wait before retrying.");
                 } else if e.to_string().contains("permission") || e.to_string().contains("access") {
                     info!("💡 Tip: Check that you have edit permissions for this sheet.");
                 } else if e.to_string().contains("not found") {
@@ -1716,6 +1690,161 @@ impl SheetsManager {
         );
         Ok(total_updated)
     }
+
+    async fn fetch_last_used_row(&mut self, namespace: &str) -> Result<usize> {
+        // Read column A only (fast) to detect last non-empty key row.
+        let sheet_id = self.sheet_id.clone();
+        let hub = self.get_hub().await?;
+        let range = format!("{}!A:A", namespace);
+        let result = Self::call_with_rate_limit_retry("fetch last used row", || {
+            let hub = hub;
+            let sheet_id = sheet_id.clone();
+            let range = range.clone();
+            async move { hub.spreadsheets().values_get(&sheet_id, &range).doit().await }
+        }).await?;
+
+        let values = result.1.values.unwrap_or_default();
+        // values.len() already equals the last non-empty row index (1-based),
+        // because trailing empty rows are trimmed by the API.
+        Ok(values.len())
+    }
+
+    // NEW: Pure planning helper extracted from batch_update_cells. Returns prepared value ranges and stats.
+    fn plan_batch_updates(
+        &self,
+        namespace: &str,
+        translation_keys: &[TranslationKey],
+        languages: &[String],
+        existing_keys: &HashMap<String, HashMap<String, String>>,
+        mut next_row: usize,
+        key_row_map: &HashMap<String, usize>,
+    ) -> (
+        Vec<ValueRange>,                // value ranges to send
+        usize,                          // new rows added
+        usize,                          // existing cells filled
+        HashMap<String, usize>,         // per-language filled cell counts
+    ) {
+        use std::collections::HashSet;
+        let mut processed: HashSet<&str> = HashSet::new();
+        let mut value_ranges: Vec<ValueRange> = Vec::new();
+        let mut new_rows_added = 0usize;
+        let mut existing_cells_filled = 0usize;
+        let mut per_language: HashMap<String, usize> = HashMap::new();
+
+        for tk in translation_keys {
+            if !processed.insert(tk.key_path.as_str()) {
+                warn!("⚠️  Skipping duplicate key in input batch: {}", tk.key_path);
+                continue;
+            }
+
+            if !existing_keys.contains_key(&tk.key_path) {
+                // New key row
+                let mut row_values = vec![
+                    serde_json::Value::String(tk.key_path.clone()),
+                    serde_json::Value::String(String::new()), // Description placeholder
+                ];
+                let default_language = Self::find_default_language_static(tk, languages);
+                for lang in languages {
+                    let v = Self::get_cell_value_for_language_static(
+                        tk,
+                        lang,
+                        &default_language,
+                        languages,
+                        next_row,
+                    );
+                    row_values.push(serde_json::Value::String(v));
+                }
+                let end_col_index = languages.len() + 1; // zero-based index for last column
+                let end_letter = Self::column_index_to_letter(end_col_index);
+                let range = format!("{}!A{}:{}{}", namespace, next_row, end_letter, next_row);
+                value_ranges.push(ValueRange {
+                    range: Some(range),
+                    values: Some(vec![row_values]),
+                    major_dimension: Some("ROWS".into()),
+                    ..Default::default()
+                });
+                next_row += 1;
+                new_rows_added += 1;
+                continue;
+            }
+
+            // Existing key: attempt to fill empty translations
+            let row_number = if let Some(r) = key_row_map.get(&tk.key_path) {
+                *r
+            } else {
+                // Row missing physically though logically present: treat as new
+                let mut row_values = vec![
+                    serde_json::Value::String(tk.key_path.clone()),
+                    serde_json::Value::String(String::new()),
+                ];
+                let default_language = Self::find_default_language_static(tk, languages);
+                for lang in languages {
+                    let v = Self::get_cell_value_for_language_static(
+                        tk,
+                        lang,
+                        &default_language,
+                        languages,
+                        next_row,
+                    );
+                    row_values.push(serde_json::Value::String(v));
+                }
+                let end_col_index = languages.len() + 1;
+                let end_letter = Self::column_index_to_letter(end_col_index);
+                let range = format!("{}!A{}:{}{}", namespace, next_row, end_letter, next_row);
+                value_ranges.push(ValueRange {
+                    range: Some(range),
+                    values: Some(vec![row_values]),
+                    major_dimension: Some("ROWS".into()),
+                    ..Default::default()
+                });
+                next_row += 1;
+                new_rows_added += 1;
+                continue;
+            };
+
+            let existing_langs = existing_keys.get(&tk.key_path).unwrap();
+            let default_language = Self::find_default_language_static(tk, languages)
+                .or_else(|| {
+                    Self::find_default_language_static(
+                        &TranslationKey {
+                            key_path: tk.key_path.clone(),
+                            values: existing_langs.clone(),
+                            namespace: namespace.to_string(),
+                        },
+                        languages,
+                    )
+                });
+
+            for (pos, lang) in languages.iter().enumerate() {
+                if existing_langs.contains_key(lang) {
+                    continue;
+                }
+                let cell_value = Self::get_cell_value_for_language_static(
+                    tk,
+                    lang,
+                    &default_language,
+                    languages,
+                    row_number,
+                );
+                if cell_value.trim().is_empty() {
+                    continue;
+                }
+                let col_index = 2 + pos; // offset for key + desc
+                let col_letter = Self::column_index_to_letter(col_index);
+                let range = format!("{}!{}{}:{}{}", namespace, col_letter, row_number, col_letter, row_number);
+                value_ranges.push(ValueRange {
+                    range: Some(range),
+                    values: Some(vec![vec![serde_json::Value::String(cell_value)]]),
+                    major_dimension: Some("ROWS".into()),
+                    ..Default::default()
+                });
+                existing_cells_filled += 1;
+                *per_language.entry(lang.clone()).or_default() += 1;
+            }
+        }
+
+        (value_ranges, new_rows_added, existing_cells_filled, per_language)
+    }
 }
 
 #[cfg(test)]
@@ -1767,5 +1896,50 @@ mod tests {
         );
 
         assert_eq!(result, "Connexion");
+    }
+
+    // Additional tests for planning logic
+    #[test]
+    fn plan_new_rows_only() {
+        let mgr = SheetsManager { sheet_id: "s".into(), auth_manager: crate::auth::oauth::AuthManager::new(None), main_language: "en".into(), hub: None };
+        let languages = vec!["en".into(), "fr".into()];
+        let tk1 = TranslationKey { key_path: "k1".into(), values: HashMap::from([(String::from("en"), String::from("Hello"))]), namespace: "ns".into() };
+        let tk2 = TranslationKey { key_path: "k2".into(), values: HashMap::from([(String::from("en"), String::from("World"))]), namespace: "ns".into() };
+        let existing = HashMap::new();
+        let key_row_map = HashMap::new();
+        let (ranges, new_rows, filled, per_lang) = mgr.plan_batch_updates("ns", &[tk1, tk2], &languages, &existing, 2, &key_row_map);
+        assert_eq!(new_rows, 2);
+        assert_eq!(filled, 0);
+        assert!(per_lang.is_empty());
+        assert_eq!(ranges.len(), 2);
+    }
+
+    #[test]
+    fn plan_fills_missing_cells() {
+        let mgr = SheetsManager { sheet_id: "s".into(), auth_manager: crate::auth::oauth::AuthManager::new(None), main_language: "en".into(), hub: None };
+        let languages = vec!["en".into(), "fr".into()];
+        let mut existing: HashMap<String, HashMap<String,String>> = HashMap::new();
+        existing.insert("k1".into(), HashMap::from([(String::from("en"), String::from("Hi"))]));
+        let key_row_map = HashMap::from([(String::from("k1"), 2usize)]);
+        let tk = TranslationKey { key_path: "k1".into(), values: HashMap::from([(String::from("en"), String::from("Hi"))]), namespace: "ns".into() };
+        let (ranges, new_rows, filled, per_lang) = mgr.plan_batch_updates("ns", &[tk], &languages, &existing, 3, &key_row_map);
+        assert_eq!(new_rows, 0);
+        assert_eq!(filled, 1); // fr cell generated
+        assert_eq!(per_lang.get("fr").copied(), Some(1));
+        assert_eq!(ranges.len(), 1);
+    }
+
+    #[test]
+    fn plan_skips_duplicates() {
+        let mgr = SheetsManager { sheet_id: "s".into(), auth_manager: crate::auth::oauth::AuthManager::new(None), main_language: "en".into(), hub: None };
+        let languages = vec!["en".into()];
+        let existing = HashMap::new();
+        let key_row_map = HashMap::new();
+        let tk1 = TranslationKey { key_path: "dup".into(), values: HashMap::from([(String::from("en"), String::from("A"))]), namespace: "ns".into() };
+        let tk2 = TranslationKey { key_path: "dup".into(), values: HashMap::from([(String::from("en"), String::from("B"))]), namespace: "ns".into() };
+        let (ranges, new_rows, filled, _) = mgr.plan_batch_updates("ns", &[tk1, tk2], &languages, &existing, 2, &key_row_map);
+        assert_eq!(new_rows, 1);
+        assert_eq!(filled, 0);
+        assert_eq!(ranges.len(), 1);
     }
 }
