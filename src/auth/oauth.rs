@@ -171,9 +171,9 @@ impl AuthManager {
             None => anyhow::bail!(
                 "❌ No authentication tokens found.\n\n\
                 Please authenticate first using one of these commands:\n\
-                • Default (home directory): cargo run -- auth\n\
-                • Local directory:         cargo run -- auth --local-cache\n\
-                • Custom location:         cargo run -- auth --auth-cache /path/to/tokens.json\n\n\
+                • Default (home directory): i18n_google_sync auth\n\
+                • Local directory:         i18n_google_sync auth --local-cache\n\
+                • Custom location:         i18n_google_sync auth --auth-cache /path/to/tokens.json\n\n\
                 Then retry your sync command."
             ),
         }

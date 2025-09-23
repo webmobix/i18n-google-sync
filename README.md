@@ -8,19 +8,19 @@ The tool uses a **two-step workflow**: authenticate once, then sync many times.
 
 ```bash
 # Step 1: Authenticate (one-time setup)
-cargo run -- auth
+i18n_google_sync auth
 
 # Step 2: Sync operations (use as needed)
 # Default: add new keys then pull translations back
-cargo run -- sync --sheet-id "your-google-sheet-id" --dry-run
-cargo run -- sync --sheet-id "your-google-sheet-id"
+i18n_google_sync sync --sheet-id "your-google-sheet-id" --dry-run
+i18n_google_sync sync --sheet-id "your-google-sheet-id"
 
 # Optional: mark a different language as the main column during the first run
-cargo run -- sync --sheet-id "your-google-sheet-id" --main-language "fr"
+i18n_google_sync sync --sheet-id "your-google-sheet-id" --main-language "fr"
 
 # Optional one-way modes
-cargo run -- sync --mode add-keys --sheet-id "your-google-sheet-id"
-cargo run -- sync --mode sync-back --sheet-id "your-google-sheet-id"
+i18n_google_sync sync --mode add-keys --sheet-id "your-google-sheet-id"
+i18n_google_sync sync --mode sync-back --sheet-id "your-google-sheet-id"
 ```
 
 This approach is **secure**, **CI-friendly**, and **efficient** for team workflows.
@@ -126,8 +126,8 @@ cp ~/Downloads/client_secret_*.json ~/.i18n-google-sync/client_secret.json
 
 ```bash
 # Test with dry-run to verify credentials work
-cargo run -- auth
-cargo run -- sync add-keys --sheet-id "your-google-sheet-id" --dry-run
+i18n_google_sync auth
+i18n_google_sync sync add-keys --sheet-id "your-google-sheet-id" --dry-run
 ```
 
 ### 🔄 Two-Step Authentication Process
@@ -136,13 +136,13 @@ cargo run -- sync add-keys --sheet-id "your-google-sheet-id" --dry-run
 
 ```bash
 # Default: Store tokens in home directory (~/.i18n-google-sync/tokens.json)
-cargo run -- auth
+i18n_google_sync auth
 
 # Local: Store tokens in project directory (./.i18n-google-sync/tokens.json)
-cargo run -- auth --local-cache
+i18n_google_sync auth --local-cache
 
 # Custom: Store tokens at specific location
-cargo run -- auth --auth-cache /path/to/tokens.json
+i18n_google_sync auth --auth-cache /path/to/tokens.json
 ```
 
 **What happens during authentication:**
@@ -155,9 +155,9 @@ cargo run -- auth --auth-cache /path/to/tokens.json
 
 ```bash
 # Tokens are automatically found and used
-cargo run -- sync add-keys --sheet-id "your-sheet-id" --main-language "en"
-cargo run -- sync sync-back --sheet-id "your-sheet-id"
-cargo run -- sync full-sync --sheet-id "your-sheet-id"
+i18n_google_sync sync add-keys --sheet-id "your-sheet-id" --main-language "en"
+i18n_google_sync sync sync-back --sheet-id "your-sheet-id"
+i18n_google_sync sync full-sync --sheet-id "your-sheet-id"
 ```
 
 ### 🗂️ File Storage Locations
@@ -194,7 +194,7 @@ ls ~/.i18n-google-sync/client_secret.json
 **"No authentication tokens found" error:**
 ```bash
 # Run the auth command first:
-cargo run -- auth
+i18n_google_sync auth
 ```
 
 **"Invalid client" error:**
@@ -276,38 +276,38 @@ Options:
 
 ```bash
 # Authenticate and store tokens in home directory (default)
-cargo run -- auth
+i18n_google_sync auth
 
 # Store tokens in local project directory
-cargo run -- auth --local-cache
+i18n_google_sync auth --local-cache
 
 # Store tokens at custom location
-cargo run -- auth --auth-cache ~/.config/i18n-sync/tokens.json
+i18n_google_sync auth --auth-cache ~/.config/i18n-sync/tokens.json
 ```
 
 #### Step 2: Sync Operations (Many Times)
 
 ```bash
 # Add new translation keys to Google Sheets (dry-run)
-cargo run -- sync add-keys --sheet-id "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms" --dry-run
+i18n_google_sync sync add-keys --sheet-id "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms" --dry-run
 
 # Add keys for real
-cargo run -- sync add-keys --sheet-id "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms"
+i18n_google_sync sync add-keys --sheet-id "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms"
 
 # Sync translations back to local files
-cargo run -- sync sync-back --sheet-id "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms"
+i18n_google_sync sync sync-back --sheet-id "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms"
 
 # Full bidirectional sync
-cargo run -- sync full-sync --sheet-id "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms"
+i18n_google_sync sync full-sync --sheet-id "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms"
 
 # Use custom locales directory
-cargo run -- sync add-keys --sheet-id "your-sheet-id" --locales-path /path/to/translations
+i18n_google_sync sync add-keys --sheet-id "your-sheet-id" --locales-path /path/to/translations
 
 # Spanish as default language
-cargo run -- sync add-keys --sheet-id "your-sheet-id" --default-lang es
+i18n_google_sync sync add-keys --sheet-id "your-sheet-id" --default-lang es
 
 # Use custom token location
-cargo run -- sync add-keys --sheet-id "your-sheet-id" --token-path /path/to/tokens.json
+i18n_google_sync sync add-keys --sheet-id "your-sheet-id" --token-path /path/to/tokens.json
 ```
 
 ### Token Discovery
@@ -380,17 +380,17 @@ echo '{"hello": "Hello", "goodbye": "Goodbye"}' > locales/en/common.json
 # 3. Create a new Google Sheet and get its ID
 
 # 4. Authenticate with Google (one-time setup)
-cargo run -- auth
+i18n_google_sync auth
 
 # 5. First sync - add keys to sheet (preview first)
-cargo run -- sync add-keys --sheet-id "your-sheet-id" --dry-run
+i18n_google_sync sync add-keys --sheet-id "your-sheet-id" --dry-run
 
 # 6. Apply the changes
-cargo run -- sync add-keys --sheet-id "your-sheet-id"
+i18n_google_sync sync add-keys --sheet-id "your-sheet-id"
 
 # 7. Google Translate will auto-generate translations in the sheet
 # 8. Sync back the translated content
-cargo run -- sync sync-back --sheet-id "your-sheet-id"
+i18n_google_sync sync sync-back --sheet-id "your-sheet-id"
 ```
 
 ### Scenario 2: Adding New Features
@@ -400,14 +400,14 @@ cargo run -- sync sync-back --sheet-id "your-sheet-id"
 # locales/en/auth.json: {"login": {"title": "Sign In", "button": "Login"}}
 
 # 2. Preview what will be added to the sheet
-cargo run -- sync add-keys --sheet-id "your-sheet-id" --dry-run
+i18n_google_sync sync add-keys --sheet-id "your-sheet-id" --dry-run
 
 # 3. Add the new keys
-cargo run -- sync add-keys --sheet-id "your-sheet-id"
+i18n_google_sync sync add-keys --sheet-id "your-sheet-id"
 
 # 4. Check Google Sheets - new translations should appear with GOOGLETRANSLATE formulas
 # 5. After translations are processed, sync back
-cargo run -- sync sync-back --sheet-id "your-sheet-id"
+i18n_google_sync sync sync-back --sheet-id "your-sheet-id"
 ```
 
 ### Scenario 3: Translator Workflow
@@ -417,10 +417,10 @@ cargo run -- sync sync-back --sheet-id "your-sheet-id"
 # 2. Developer syncs changes back to code
 
 # Preview what will be updated
-cargo run -- sync sync-back --sheet-id "your-sheet-id" --dry-run
+i18n_google_sync sync sync-back --sheet-id "your-sheet-id" --dry-run
 
 # Apply the changes
-cargo run -- sync sync-back --sheet-id "your-sheet-id"
+i18n_google_sync sync sync-back --sheet-id "your-sheet-id"
 
 # 3. Commit the updated JSON files to version control
 git add locales/
@@ -433,13 +433,13 @@ git commit -m "Update translations from Google Sheets"
 # In your CI/CD pipeline, you can authenticate once and then run multiple operations
 
 # 1. Authenticate and store tokens for the pipeline
-cargo run -- auth --local-cache
+i18n_google_sync auth --local-cache
 
 # 2. Add any new keys from feature branches
-cargo run -- sync add-keys --sheet-id "your-sheet-id"
+i18n_google_sync sync add-keys --sheet-id "your-sheet-id"
 
 # 3. Sync back the latest translations for deployment
-cargo run -- sync sync-back --sheet-id "your-sheet-id"
+i18n_google_sync sync sync-back --sheet-id "your-sheet-id"
 
 # 4. The tokens are automatically found in the local cache
 # No need to re-authenticate for subsequent commands
@@ -449,14 +449,14 @@ cargo run -- sync sync-back --sheet-id "your-sheet-id"
 
 ```bash
 # Each team member authenticates once on their machine
-cargo run -- auth  # Stores tokens in home directory
+i18n_google_sync auth  # Stores tokens in home directory
 
 # Everyone can then sync using the same commands
-cargo run -- sync add-keys --sheet-id "shared-sheet-id"
-cargo run -- sync sync-back --sheet-id "shared-sheet-id"
+i18n_google_sync sync add-keys --sheet-id "shared-sheet-id"
+i18n_google_sync sync sync-back --sheet-id "shared-sheet-id"
 
 # Or use project-specific tokens for different projects
-cargo run -- auth --local-cache  # Per-project authentication
+i18n_google_sync auth --local-cache  # Per-project authentication
 ```
 
 ## 🔧 Development
@@ -516,7 +516,7 @@ echo '{"test": "Hello"}' > locales/en/common.json
 **"Sheet ID cannot be empty" error:**
 ```bash
 # Ensure you provide a valid Google Sheet ID
-cargo run -- --sheet-id "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms"
+i18n_google_sync --sheet-id "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms"
 ```
 
 **Compilation errors:**
@@ -530,24 +530,24 @@ cargo build
 **Permission denied on auth cache:**
 ```bash
 # Use a writable directory for token cache
-cargo run -- --sheet-id "your-id" --auth-cache ~/.config/i18n-sync/tokens.json
+i18n_google_sync --sheet-id "your-id" --auth-cache ~/.config/i18n-sync/tokens.json
 ```
 
 ### Getting Help
 
 1. **Check the help output:**
    ```bash
-   cargo run -- --help
+   i18n_google_sync --help
    ```
 
 2. **Enable verbose logging:**
    ```bash
-   RUST_LOG=debug cargo run -- --sheet-id "your-id" --dry-run
+   RUST_LOG=debug i18n_google_sync --sheet-id "your-id" --dry-run
    ```
 
 3. **Test with dry-run first:**
    ```bash
-   cargo run -- --sheet-id "your-id" --dry-run
+   i18n_google_sync --sheet-id "your-id" --dry-run
    ```
 
 4. **Verify your setup:**
