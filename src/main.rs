@@ -239,9 +239,9 @@ async fn handle_auth_command(auth_cache: Option<PathBuf>, local_cache: bool) -> 
             if let Some(path) = token_cache_path {
                 info!("💾 Tokens saved to: {}", path.display());
                 info!("You can now run sync commands:");
-                info!("  cargo run -- sync add-keys --sheet-id YOUR_SHEET_ID");
-                info!("  cargo run -- sync sync-back --sheet-id YOUR_SHEET_ID");
-                info!("  cargo run -- sync full-sync --sheet-id YOUR_SHEET_ID");
+                info!("  i18n_google_sync sync add-keys --sheet-id YOUR_SHEET_ID");
+                info!("  i18n_google_sync sync sync-back --sheet-id YOUR_SHEET_ID");
+                info!("  i18n_google_sync sync full-sync --sheet-id YOUR_SHEET_ID");
             }
         }
         Err(err) => {
