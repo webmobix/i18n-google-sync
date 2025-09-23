@@ -210,17 +210,22 @@ impl AddKeysMode {
         );
 
         // Step 5: Add new keys to sheet
-        let keys_added = sheets_manager
+        let keys_added_outcome = sheets_manager
             .batch_update_cells(namespace, &new_keys, &languages, config.dry_run)
             .await?;
 
+        let keys_added = keys_added_outcome.new_rows;
+
         if config.dry_run {
             info!(
-                "🔍 [DRY RUN] Would add {} keys to namespace '{}'",
-                keys_added, namespace
+                "🔍 [DRY RUN] Would add {} keys ({} total cell updates) to namespace '{}'",
+                keys_added, keys_added_outcome.total_updates, namespace
             );
         } else {
-            info!("✅ Added {} keys to namespace '{}'", keys_added, namespace);
+            info!(
+                "✅ Added {} keys ({} total cell updates) to namespace '{}'",
+                keys_added, keys_added_outcome.total_updates, namespace
+            );
         }
 
         Ok(keys_added)
